@@ -476,6 +476,75 @@ DATA 기사의 구조적 청사진을 참고하여, **서론-본론-결론** 형
         if verbose:
             print(f"    완료 ({elapsed:.1f}초, {response.usage.output_tokens}토큰)")
 
+        # ---------------------------------------------------------------
+        # [2-b단계] 초안 길이 부족 시 자동 확장 (최대 2회 재시도)
+        # ---------------------------------------------------------------
+        min_body_length = 2400
+        if metrics and metrics.get("bounds"):
+            min_body_length = int(metrics["bounds"]["article_length_min"])
+
+        for expansion_attempt in range(2):
+            body_length = self._measure_body_length(draft)
+            if body_length >= min_body_length:
+                break
+
+            shortfall = min_body_length - body_length
+            if verbose:
+                print(f"    초안 길이 부족: {body_length}자 (최소 {min_body_length}자, {shortfall}자 부족)")
+                print(f"    확장 재시도 {expansion_attempt + 1}/2...")
+                print(f"    API rate limit 대기 (70초)...")
+            time.sleep(70)
+
+            expand_prompt = f"""아래 기사 초안이 너무 짧습니다.
+현재 본문 길이: {body_length}자
+필요한 최소 길이: {min_body_length}자
+부족한 분량: {shortfall}자
+
+아래 보도자료에서 아직 기사에 반영되지 않은 정보를 찾아 추가하여,
+기사 본문이 반드시 {min_body_length}자 이상이 되도록 확장하십시오.
+
+추가할 수 있는 정보 예시:
+- 도서 가격, 쪽수, 출판사명
+- 수상 내역, 선정 날짜
+- 화가 이름, 작품명
+- 목차 구성, 파트 이름
+- 미술관 이름
+- 기자 경력, 학력
+- 인용문, 추천사
+
+기존 내용은 그대로 유지하면서 정보를 추가하십시오.
+기존 문장을 삭제하지 마십시오.
+보도자료에 없는 내용을 창작하지 마십시오.
+
+## 현재 기사 초안
+
+{draft}
+
+## 보도자료 (여기서 누락된 정보를 찾으십시오)
+
+{press_release}
+
+확장된 기사 전문을 출력하십시오. 기사만 출력하고 다른 설명은 붙이지 마십시오.
+"""
+            expand_response = self._api_call_with_retry(
+                model=self.model_id,
+                max_tokens=self.max_tokens,
+                temperature=max(temperature - 0.1, 0.3),
+                system=system_prompt,
+                messages=[{"role": "user", "content": expand_prompt}],
+            )
+            expanded = self._extract_text(expand_response)
+            expanded_length = self._measure_body_length(expanded)
+
+            if expanded_length > body_length:
+                draft = expanded
+                if verbose:
+                    print(f"    확장 완료: {body_length}자 → {expanded_length}자")
+            else:
+                if verbose:
+                    print(f"    확장 실패 (길이 증가 없음). 기존 초안 유지.")
+                break
+
         result = {
             "outline": outline,
             "draft": draft,
@@ -557,6 +626,16 @@ DATA 기사의 구조적 청사진을 참고하여, **서론-본론-결론** 형
             system_prompt, temperature, metrics,
             example_articles,
         )
+
+        # 안전장치: 교정 후 길이가 줄었으면 초안 유지
+        draft_len = self._measure_body_length(draft)
+        final_len = self._measure_body_length(final)
+        if final_len < draft_len:
+            if verbose:
+                print(f"    교정 후 길이 감소 ({draft_len}→{final_len}자). 초안 유지.")
+            final = draft
+            notes = "(교정 후 길이 감소로 초안 유지)"
+
         result["final"] = final
         result["refinement_notes"] = notes
 
@@ -1203,6 +1282,19 @@ DATA 기사를 다시 한 번 떠올리고, 그 기사들과 동일한 수준의
             prompt += f"\n## 기사 방향(앵글)\n\n{angle}\n\n이 방향으로 작성하십시오.\n"
 
         return prompt
+
+    @staticmethod
+    def _measure_body_length(article: str) -> int:
+        """기사 본문 길이를 측정한다 (제목·부제 제외)."""
+        raw_lines = [ln.strip() for ln in article.strip().split('\n') if ln.strip()]
+        # 제목/부제 건너뛰기: 첫 번째 긴 줄(>=100자) 또는 5번째 줄부터 본문
+        body_start = 0
+        for i, ln in enumerate(raw_lines):
+            if len(ln) >= 100 or i >= 5:
+                body_start = i
+                break
+        body_lines = raw_lines[body_start:]
+        return sum(len(ln) for ln in body_lines)
 
     @staticmethod
     def _extract_text(response) -> str:
