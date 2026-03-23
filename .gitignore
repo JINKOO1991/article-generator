@@ -1,0 +1,20 @@
+# API 키 (절대 업로드 금지)
+.env
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# 개인 데이터 (당신의 기사 원본)
+data/my_articles/
+data/press_release.txt
+
+# 생성된 파일 (실행할 때마다 새로 만들어짐)
+data/style_dna.json
+data/style_profile.json
+output/
+
+# 기타
+python
+*.zip
